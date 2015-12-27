@@ -1,0 +1,13 @@
+[package]
+name = "bellman"
+version = "0.1.0"
+authors = ["Tristram Gräbener <tristramg@gmail.com>"]
+
+[dependencies]
+byteorder = "0.3"
+postgres = "0.10"
+time = "0.1"
+piston2d-graphics = "0.13.0"
+image = "*"
+pbr = "0.0.4"
+
