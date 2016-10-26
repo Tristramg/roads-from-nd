@@ -1,218 +1,190 @@
-extern crate byteorder;
-extern crate postgres;
-extern crate time;
-extern crate pbr;
-extern crate graphics;
-extern crate image;
+extern crate osm4routing;
+extern crate pdf;
+extern crate docopt;
 
+use docopt::Docopt;
+use pdf::graphicsstate::Color;
+use std::collections::{HashMap, BinaryHeap};
+use std::cmp::max;
+use std::{i64, f64, f32};
+use std::str::FromStr;
+use std::time::SystemTime;
 
-use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
-use std::io::Result as IoResult;
-use std::{cmp, env};
-use std::collections::HashMap;
-use byteorder::{LittleEndian, ReadBytesExt};
-use postgres::{Connection, SslMode};
-use pbr::ProgressBar;
-use image::ImageBuffer;
+fn main() {
+    const USAGE: &'static str = "Roads from Notre-Dame (or anywhere else)
 
-struct Node {
-    osm_id: u32,
-    lon: f32,
-    lat: f32,
-}
+Usage:
+  roads-from-nd [options] <source.osm.pbf> <node> <output.pdf>
+  roads-from-nd -h | --help
 
-struct Edge {
-    source: usize,
-    target: usize,
-    weight: u32,
+Options:
+  -h --help      Show this screen
+  --width WIDTH  Width of the largest stoke [default: 3]
+  --keep EDGES   Keep only the NUM_EDGES most important edges [default: 100000]";
+
+    let args = Docopt::new(USAGE).unwrap().parse().unwrap_or_else(|e| e.exit());
+
+    let start_node = i64::from_str(args.get_str("<node>")).expect("Read source osm node");
+    let max_width = f32::from_str(args.get_str("--width")).unwrap_or(3.);
+    let keep_edges = usize::from_str(args.get_str("--keep")).unwrap_or(100000);
+
+    let now = SystemTime::now();
+    println!("Loading the graph");
+    let g = Graph::from_osm(args.get_str("<source.osm.pbf>"));
+    println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
+
+    let now = SystemTime::now();
+    println!("Running Dijkstra’s algorithm");
+    let pred = g.dijkstra(start_node);
+    println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
+
+    let now = SystemTime::now();
+    println!("Counting the use of each edge");
+    let usages = g.count_uses(pred);
+    println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
+
+    let now = SystemTime::now();
+    println!("Rendering the PDF file");
+    g.render(&usages, args.get_str("<output.pdf>"), max_width, keep_edges);
+    println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
 }
 
 struct Graph {
-    edges: Vec<Edge>,
-    nodes: Vec<Node>,
-}
-
-impl Node {
-    fn from_osrm(reader: &mut BufReader<&File>) -> IoResult<Node> {
-        let lat = try!(reader.read_i32::<LittleEndian>());
-        let lon = try!(reader.read_i32::<LittleEndian>());
-        let id = try!(reader.read_u32::<LittleEndian>());
-        let _ = try!(reader.seek(SeekFrom::Current(4)));
-
-        Ok(Node {
-            osm_id: id,
-            lon: lon as f32 / 1e6,
-            lat: lat as f32 / 1e6
-        })
-    }
-}
-
-impl Edge {
-    fn from_osrm(reader: &mut BufReader<&File>) -> IoResult<Edge> {
-        let source = try!(reader.read_u32::<LittleEndian>()) as usize;
-        let target = try!(reader.read_u32::<LittleEndian>()) as usize;
-        let _ = try!(reader.seek(SeekFrom::Current(4)));
-        let weight = try!(reader.read_u32::<LittleEndian>());
-        let _ = try!(reader.seek(SeekFrom::Current(4)));
-
-        Ok(Edge {
-            source: source,
-            target: target,
-            weight: weight,
-        })
-    }
+    adj_list: Vec<Vec<(usize, f64)>>,
+    nodes: Vec<osm4routing::models::Node>,
+    nodes_to_vertex: HashMap<i64, usize>,
 }
 
 impl Graph {
+    fn from_osm(filename: &str) -> Graph {
+        let (nodes, edges) = osm4routing::reader::read(filename).expect("Read OSM file");
 
-    fn new(file: &String, source_osm_id: u32) -> IoResult<(Graph, usize)> {
-        let file = try!(File::open(file)); 
+        let mut nodes_to_vertex = HashMap::new();
+        nodes_to_vertex.reserve(nodes.len());
+        let mut adj_list = Vec::with_capacity(nodes.len());
 
-        let mut reader = BufReader::new(&file);
-        let mut source_index = 0;
-        let _ = reader.seek(SeekFrom::Start(156));
+        for (i, n) in nodes.iter().enumerate() {
+            nodes_to_vertex.insert(n.id, i);
+            adj_list.push(Vec::new());
+        }
 
-        let nodes_count = try!(reader.read_u32::<LittleEndian>()) as usize;
-        println!("  — Reading {:?} nodes", nodes_count);
-        let mut nodes = Vec::with_capacity(nodes_count);
-        let mut n_pb = ProgressBar::new(nodes_count);
-        for i in 0..nodes_count {
-            let node = try!(Node::from_osrm(&mut reader));
-            if node.osm_id == source_osm_id {
-                source_index = i
+        for edge in edges.iter()
+            .filter(|&e| e.properties.car_forward >= 2 || e.properties.car_backward >= 2) {
+            let s = nodes_to_vertex[&edge.source];
+            let t = nodes_to_vertex[&edge.target];
+            if edge.properties.car_forward >= 2 {
+                adj_list[s].push((t, edge.length() / (edge.properties.car_forward as f64)));
             }
-            nodes.push(node);
-            if i % 1000 == 0 {
-                n_pb.add(1000);
+            if edge.properties.car_backward >= 2 {
+                adj_list[t].push((s, edge.length() / (edge.properties.car_backward as f64)));
             }
         }
-        n_pb.add(nodes_count % 1000);
 
-        let edges_count = try!(reader.read_u32::<LittleEndian>()) as usize;
-        println!("  – Reading {:?} edges", edges_count);
-        let mut edges = Vec::with_capacity(edges_count);
-        let mut e_pb = ProgressBar::new(edges_count);
-        for i in 0..edges_count {
-            let edge = try!(Edge::from_osrm(&mut reader));
-            edges.push(edge);
-            if i % 1000 == 0 {
-                e_pb.add(1000);
-            }
+        Graph {
+            adj_list: adj_list,
+            nodes: nodes,
+            nodes_to_vertex: nodes_to_vertex,
         }
-        e_pb.add(nodes_count % 1000);
-
-        Ok((Graph { edges: edges, nodes: nodes }, source_index))
     }
 
-    fn bellman(&self, source: usize) -> Vec<usize> {
-        let nodes_count = self.nodes.len();
-        let mut pred = (0..nodes_count).collect::<Vec<_>>();
-        let mut dist = std::iter::repeat(std::u32::MAX).take(nodes_count).collect::<Vec<_>>();
-        dist[source] = 0;
+    fn dijkstra(&self, source: i64) -> Vec<usize> {
+        let mut pred = Vec::with_capacity(self.nodes.len());
+        let mut dist = Vec::with_capacity(self.nodes.len());
 
-        let mut improvement = true;
-        while improvement {
-            improvement = false;
-            for edge in &self.edges {
-                let source_dist = dist[edge.source];
-                let target_dist = dist[edge.target];
-                if source_dist != std::u32::MAX && source_dist + edge.weight < target_dist {
-                    dist[edge.target] = source_dist + edge.weight;
-                    pred[edge.target] = edge.source;
-                    improvement = true;
-                }
+        for i in 0..self.nodes.len() {
+            pred.push(i);
+            dist.push(f64::INFINITY);
+        }
 
-                if target_dist != std::u32::MAX && target_dist + edge.weight < source_dist {
-                    dist[edge.source] = target_dist + edge.weight;
-                    pred[edge.source] = edge.target;
-                    improvement = true;
+        let mut q = BinaryHeap::new();
+        let start = self.nodes_to_vertex[&source];
+        dist[start] = 0.;
+        q.push(start);
+        while !q.is_empty() {
+            let v = q.pop().unwrap();
+            for &(target, weigth) in &self.adj_list[v] {
+                let new_weigth = dist[v] + weigth;
+                if new_weigth < dist[target] {
+                    pred[target] = v;
+                    dist[target] = new_weigth;
+                    q.push(target);
                 }
             }
         }
-
         pred
     }
 
-    fn save_uses(&self, pred: Vec<usize>) {
-        let mut edge_uses = HashMap::with_capacity(self.edges.len());
-
-        println!("  — Counting the use of every edge");
-        let mut cpb = ProgressBar::new(self.nodes.len());
-        let mut count = 0;
-        for node in 0..self.nodes.len() {
-            let mut current_node = node;
-            let mut pred_node = pred[current_node];
-            while pred_node != current_node {
-                let source = cmp::min(current_node, pred_node);
-                let target = cmp::max(current_node, pred_node);
-
-                let counter = edge_uses.entry((source, target)).or_insert(0);
-                *counter += 1;
-
-                current_node = pred_node;
-                pred_node = pred[current_node]
-            }
-            count += 1;
-            if count % 1000 == 0 {
-                cpb.add(1000);
+    fn count_uses(&self, pred: Vec<usize>) -> Vec<((usize, usize), i32)> {
+        let mut usages = HashMap::new();
+        for destination in 0..self.nodes.len() {
+            let mut v = destination;
+            while v != pred[v] {
+                let usage = usages.entry((pred[v], v)).or_insert(0);
+                *usage += 1;
+                v = pred[v];
             }
         }
+        let mut as_vec: Vec<((usize, usize), i32)> = usages.into_iter().collect();
+        as_vec.sort_by(|&(_, a), &(_, b)| a.cmp(&b));
+        as_vec
+    }
 
-        let conn = Connection::connect("postgres://tristram:tristram@localhost/blood", &SslMode::None).unwrap();
-        // CREATE TABLE edge_use ( count INTEGER )
-        // SELECT AddGeometryColumn( 'edge_use', 'geom', 4326, 'LINESTRING', 2)
+    fn render(&self,
+              uses: &Vec<((usize, usize), i32)>,
+              filename: &str,
+              max_width: f32,
+              keep: usize) {
 
-        println!("  — Inserting into DB");
-        let mut pb = ProgressBar::new(edge_uses.len());
-        let mut count = 0;
-        let trans = conn.transaction().ok().expect("Unable to create a transaction");
-        for (&(s,t), v) in edge_uses.iter() { 
-            let source = &self.nodes[s];
-            let target = &self.nodes[t];
-            let geom = format!("st_GeomFromText('LINESTRING({} {}, {} {})', 4326)", source.lon, source.lat, target.lon, target.lat);
-            trans.execute(&format!("INSERT INTO edge_use VALUES({}, {})", v, geom), &[]).ok().expect("Insert edge failed");         
 
-            count += 1;
-            if count % 1000 == 0 {
-                pb.add(1000);
-            }
-        }
-        trans.commit().unwrap();
+        let y_min = self.nodes.iter().fold(f64::MAX, |acc, &n| acc.min(n.coord.lat));
+        let y_max = self.nodes.iter().fold(f64::MIN, |acc, &n| acc.max(n.coord.lat));
+        let avg_lat = y_min + (y_max - y_min) / 2.;
+        let lon_min = self.nodes.iter().fold(f64::MAX, |acc, &n| acc.min(n.coord.lon));
+        let lon_max = self.nodes.iter().fold(f64::MIN, |acc, &n| acc.max(n.coord.lon));
+        let (x_min, x_max) = (stupid_proj(lon_min, avg_lat), stupid_proj(lon_max, avg_lat));
+
+        let width = 1000.;
+        let ratio = width / (x_max - x_min);
+        let height = ratio * (y_max - y_min);
+
+        let max_use = uses.iter().fold(0, |acc, &(_, c)| max(acc, c));
+
+        let mut document = pdf::Pdf::create(filename).expect("Create pdf file");
+        document.render_page(width as f32, height as f32, |canvas| {
+                try!(canvas.set_line_cap_style(pdf::graphicsstate::CapStyle::Round));
+
+                for &((u, v), count) in uses.iter().rev().take(keep) {
+                    let width = sigma(max_use as f32, count as f32);
+                    let c = (128. * (1. - width)).round() as u8;
+                    try!(canvas.set_stroke_color(Color::rgb(c, c, c)));
+                    try!(canvas.set_line_width(width * max_width));;
+
+                    let x_a = stupid_proj(self.nodes[u].coord.lon, avg_lat);
+                    let y_a = self.nodes[u].coord.lat;
+                    let x_b = stupid_proj(self.nodes[v].coord.lon, avg_lat);
+                    let y_b = self.nodes[v].coord.lat;
+                    try!(canvas.line(((x_a - x_min) * ratio) as f32,
+                                     ((y_a - y_min) * ratio) as f32,
+                                     ((x_b - x_min) * ratio) as f32,
+                                     ((y_b - y_min) * ratio) as f32));
+                    try!(canvas.stroke());
+                }
+                Ok(())
+            })
+            .expect("Render the document");
+        document.finish().expect("Finish pdf document");
     }
 }
 
-
-fn main2() {
-    let args: Vec<_> = env::args().collect();
-    let start = time::now();
-
-    println!("Loading the data");
-    let (graph, source_index) = Graph::new(&args[1], 0).unwrap();
-    println!("   duration: {}s\n", (time::now() - start).num_seconds());
-
-    let bellman_start = time::now();
-    println!("Starting Bellman-Ford algorithm (progress is approximative)");
-    let pred = graph.bellman(source_index);
-    println!("   duration: {}s\n", (time::now() - bellman_start).num_seconds());
-
-    let db_start = time::now();
-    println!("Saving into the database");
-    graph.save_uses(pred);
-    println!("   duration: {}s\n", (time::now() - db_start).num_seconds());
-
-    println!("Total duration: {}s", (time::now() - start).num_seconds());
+fn stupid_proj(lon: f64, lat: f64) -> f64 {
+    lon * lat.to_radians().cos()
 }
 
-fn main() {
-    if false {
-        main2();
-    }
-    let mut image = ImageBuffer::<image::Rgb<u8>>::new(100, 100);
-    image.get_pixel_mut(5, 5).data = [255, 255, 255];
-    image.save("output.png");
+fn sigma(max: f32, x: f32) -> f32 {
+    x.log(2.) / max.log(2.)
+}
 
-    let image   = graphics::Image::new().rect(graphics::rectangle::square(0.0, 0.0, 200.0));
-
-//    let img = image::ImageBuffer.new(100, 100);
+#[test]
+fn compare_inf() {
+    assert!(32. < f64::INFINITY);
 }
