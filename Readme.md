@@ -3,6 +3,8 @@
 This projects contains the throw-away code used for the following
 blogpost: http://blog.tristramg.eu/roads-from-notre-dame.html
 
+Examples of generated images can be found at: https://www.flickr.com/photos/tristramg/albums/72157672219472853/
+
 Install Cargo http://doc.crates.io/.
 
 To run `cargo run --release -- --help`.
