@@ -40,12 +40,17 @@ Options:
 
     let now = SystemTime::now();
     println!("Counting the use of each edge");
-    let usages = g.count_uses(pred);
+    let usages = g.count_uses(&pred);
     println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
 
     let now = SystemTime::now();
     println!("Rendering the PDF file");
-    g.render(&usages, args.get_str("<output.pdf>"), max_width, keep_edges);
+    let bounds = g.bounds(&pred);
+    g.render(&usages,
+             args.get_str("<output.pdf>"),
+             max_width,
+             keep_edges,
+             bounds);
     println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
 }
 
@@ -114,7 +119,7 @@ impl Graph {
         pred
     }
 
-    fn count_uses(&self, pred: Vec<usize>) -> Vec<((usize, usize), i32)> {
+    fn count_uses(&self, pred: &Vec<usize>) -> Vec<((usize, usize), i32)> {
         let mut usages = HashMap::new();
         for destination in 0..self.nodes.len() {
             let mut v = destination;
@@ -129,18 +134,22 @@ impl Graph {
         as_vec
     }
 
+    fn bounds(&self, pred: &Vec<usize>) -> (f64, f64, f64, f64) {
+        pred.iter().filter(|&u| pred[*u] != *u).fold((f64::MAX, f64::MIN, f64::MAX, f64::MIN),
+                                                     |(xmin, xmax, ymin, ymax), u| {
+            let c = self.nodes[*u].coord;
+            (xmin.min(c.lon), xmax.max(c.lon), ymin.min(c.lat), ymax.max(c.lat))
+        })
+    }
+
     fn render(&self,
               uses: &Vec<((usize, usize), i32)>,
               filename: &str,
               max_width: f32,
-              keep: usize) {
-
-
-        let y_min = self.nodes.iter().fold(f64::MAX, |acc, &n| acc.min(n.coord.lat));
-        let y_max = self.nodes.iter().fold(f64::MIN, |acc, &n| acc.max(n.coord.lat));
+              keep: usize,
+              bounds: (f64, f64, f64, f64)) {
+        let (lon_min, lon_max, y_min, y_max) = bounds;
         let avg_lat = y_min + (y_max - y_min) / 2.;
-        let lon_min = self.nodes.iter().fold(f64::MAX, |acc, &n| acc.min(n.coord.lon));
-        let lon_max = self.nodes.iter().fold(f64::MIN, |acc, &n| acc.max(n.coord.lon));
         let (x_min, x_max) = (stupid_proj(lon_min, avg_lat), stupid_proj(lon_max, avg_lat));
 
         let width = 1000.;
@@ -153,7 +162,13 @@ impl Graph {
         document.render_page(width as f32, height as f32, |canvas| {
                 try!(canvas.set_line_cap_style(pdf::graphicsstate::CapStyle::Round));
 
-                for &((u, v), count) in uses.iter().rev().take(keep) {
+                let skip = if uses.len() < keep {
+                    0
+                } else {
+                    uses.len() - keep
+                };
+                println!("skip {}", skip);
+                for &((u, v), count) in uses.iter().skip(skip) {
                     let width = sigma(max_use as f32, count as f32);
                     let c = (128. * (1. - width)).round() as u8;
                     try!(canvas.set_stroke_color(Color::rgb(c, c, c)));
