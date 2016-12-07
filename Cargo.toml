@@ -2,6 +2,9 @@
 name = "roads-from-nd"
 version = "0.1.0"
 authors = ["Tristram Gräbener <tristramg@gmail.com>"]
+license-file = "LICENCE.md"
+repository = "https://github.com/Tristramg/roads-from-nd"
+description = "Generate an image of all roads from a single point"
 
 [dependencies]
 osm4routing = "0.2.0"
