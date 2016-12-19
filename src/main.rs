@@ -20,17 +20,19 @@ Usage:
 Options:
   -h --help      Show this screen
   --width WIDTH  Width of the largest stoke [default: 3]
-  --keep EDGES   Keep only the NUM_EDGES most important edges [default: 100000]";
+  --keep EDGES   Keep only the NUM_EDGES most important edges [default: 100000]
+  --residential  Also use residential ways. Avoid it for larger areas";
 
     let args = Docopt::new(USAGE).unwrap().parse().unwrap_or_else(|e| e.exit());
 
     let start_node = i64::from_str(args.get_str("<node>")).expect("Read source osm node");
     let max_width = f32::from_str(args.get_str("--width")).unwrap_or(3.);
     let keep_edges = usize::from_str(args.get_str("--keep")).unwrap_or(100000);
+    let residential = args.get_bool("--residential");
 
     let now = SystemTime::now();
     println!("Loading the graph");
-    let g = Graph::from_osm(args.get_str("<source.osm.pbf>"));
+    let g = Graph::from_osm(args.get_str("<source.osm.pbf>"), residential);
     println!(" ✓ duration: {}s\n", now.elapsed().unwrap().as_secs());
 
     let now = SystemTime::now();
@@ -61,7 +63,7 @@ struct Graph {
 }
 
 impl Graph {
-    fn from_osm(filename: &str) -> Graph {
+    fn from_osm(filename: &str, residential: bool) -> Graph {
         let (nodes, edges) = osm4routing::reader::read(filename).expect("Read OSM file");
 
         let mut nodes_to_vertex = HashMap::new();
@@ -73,14 +75,19 @@ impl Graph {
             adj_list.push(Vec::new());
         }
 
+        let min_importance = if residential { 1 } else { 2 };
+
         for edge in edges.iter()
-            .filter(|&e| e.properties.car_forward >= 2 || e.properties.car_backward >= 2) {
+            .filter(|&e| {
+                e.properties.car_forward >= min_importance ||
+                e.properties.car_backward >= min_importance
+            }) {
             let s = nodes_to_vertex[&edge.source];
             let t = nodes_to_vertex[&edge.target];
-            if edge.properties.car_forward >= 2 {
+            if edge.properties.car_forward >= min_importance {
                 adj_list[s].push((t, edge.length() / (edge.properties.car_forward as f64)));
             }
-            if edge.properties.car_backward >= 2 {
+            if edge.properties.car_backward >= min_importance {
                 adj_list[t].push((s, edge.length() / (edge.properties.car_backward as f64)));
             }
         }
