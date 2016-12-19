@@ -9,6 +9,7 @@ use std::cmp::max;
 use std::{i64, f64, f32};
 use std::str::FromStr;
 use std::time::SystemTime;
+use std::process;
 
 fn main() {
     const USAGE: &'static str = "Roads from Notre-Dame (or anywhere else)
@@ -109,6 +110,11 @@ impl Graph {
         }
 
         let mut q = BinaryHeap::new();
+        if !self.nodes_to_vertex.contains_key(&source) {
+            println!("The node {} is unknown. Are you sure it is the intersection of two roads?",
+                     source);
+            process::exit(1);
+        }
         let start = self.nodes_to_vertex[&source];
         dist[start] = 0.;
         q.push(start);
