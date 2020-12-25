@@ -1,9 +1,9 @@
 # All roads from Notre-Dame
 
 This projects contains the throw-away code used for the following
-blogpost: http://blog.tristramg.eu/roads-from-notre-dame.html
+blogpost: https://tristramg.eu/roads-from-notre/
 
-Examples of generated images can be found at: https://www.flickr.com/photos/tristramg/albums/72157672219472853/
+Examples of generated images can be found at: https://cloud.tristramg.eu/index.php/s/nKTxqGmDXBNfSs2
 
 Install Cargo http://doc.crates.io/.
 
